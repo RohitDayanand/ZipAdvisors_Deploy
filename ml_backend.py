@@ -14,7 +14,7 @@ import xgboost as xgb
 pymysql.install_as_MySQLdb()
 
 model = xgb.XGBClassifier()
-model = model.load_model('models/two_player_xgb.json')
+model = model.load_model('Models/two_player_xgb.json')
 
 load_dotenv()
 DB_USER = os.getenv('DB_USER')
