@@ -4,7 +4,7 @@ from ml_backend import plot_kalshi_data, plot_polymarket_data
 from ml_backend import plot_kalshi_volatility, plot_polymarket_volatility
 from flask_cors import CORS
 from datetime import datetime
-from ml_backend import xgb_algorithm
+from ml_backend import xgb_algorithm_plot
 import os
 
 app = Flask(__name__)
@@ -53,12 +53,14 @@ def index():
                 elif algo == "volatility":
                     kalshi_url = plot_kalshi_volatility(select_market, prediction_market)
                 elif algo == "xgboost":
-                    print(xgb_algorithm(select_market, prediction_market))
+                    threshold = form_data.get("threshold")
+                    polymarket_url, kalshi_url = xgb_algorithm_plot(select_market, prediction_market, threshold)
 
             elif market_type == "polymarket":
                 if algo == "show":
                     polymarket_url = plot_polymarket_data(select_market, prediction_market, choice)
                 elif algo == "volatility":
+                    prediction_market = form_data.get("prediction-market")
                     polymarket_url = plot_polymarket_volatility(select_market, prediction_market)
 
         except Exception as e:
@@ -75,6 +77,9 @@ def index():
             polymarket_url=polymarket_url
         )
 if __name__ == '__main__':
+    '''
+    app.run(debug=True)
+    '''
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
 

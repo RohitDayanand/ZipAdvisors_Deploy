@@ -86,7 +86,10 @@ def plot_polymarket_data(P_prediction, P_market, choice):
     
     else:
         choice = 'no_price'
-    fig = px.line(df_polymarket, x='timestamp', y=f'{choice}', title=f'Polymarket Graph for {P_prediction}')
+
+    prediction_label = convert_table_name_to_clean(P_prediction)
+    market_label = convert_table_name_to_clean(P_market)
+    fig = px.line(df_polymarket, x='timestamp', y=f'{choice}', title=f'Polymarket Graph for {prediction_label} and {market_label}')
     fig.update_xaxes(
         rangeslider_visible=True,
         rangeselector=dict(
@@ -161,11 +164,11 @@ def plot_kalshi_volatility(K_prediction, K_market, window=12):
             rangeslider=dict(visible=True),
             rangeselector=dict(
                 buttons=list([
-                    dict(count=1, label="1m", step="month", stepmode="backward"),
-                    dict(count=6, label="6m", step="month", stepmode="backward"),
-                    dict(count=1, label="YTD", step="year", stepmode="todate"),
-                    dict(count=1, label="1y", step="year", stepmode="backward"),
-                    dict(step="all")
+                    dict(count=30, label="30s", step="second", stepmode="backward"), 
+                    dict(count=1, label="1m", step="minute", stepmode="backward"), 
+                    dict(count=1, label="1h", step="hour", stepmode="backward"), 
+                    dict(count=1, label="1d", step="day", stepmode="backward"),
+                    dict(step="all", label="To Date"),
                 ])
             )
         ),
@@ -207,11 +210,11 @@ def plot_polymarket_volatility(P_prediction, P_market, window=12):
             rangeslider=dict(visible=True),
             rangeselector=dict(
                 buttons=list([
-                    dict(count=1, label="1m", step="month", stepmode="backward"),
-                    dict(count=6, label="6m", step="month", stepmode="backward"),
-                    dict(count=1, label="YTD", step="year", stepmode="todate"),
-                    dict(count=1, label="1y", step="year", stepmode="backward"),
-                    dict(step="all")
+                    dict(count=30, label="30s", step="second", stepmode="backward"), 
+                    dict(count=1, label="1m", step="minute", stepmode="backward"), 
+                    dict(count=1, label="1h", step="hour", stepmode="backward"), 
+                    dict(count=1, label="1d", step="day", stepmode="backward"),
+                    dict(step="all", label="To Date"),
                 ])
             )
         ),
@@ -439,11 +442,10 @@ def xgb_predict(final_df, key_players):
 
     model = xgb.XGBClassifier()
     model.load_model('./Models/two_player_xgb.json')
-    feature_order = model.get_booster().feature_names
     try:
         y_pred = model.predict(X)[0]
         y_prob = model.predict_proba(X)
-        return y_pred
+        return y_pred, y_prob
     except Exception as e:
         print("DEBUG: Error during model prediction:", e)
         raise e
@@ -489,10 +491,98 @@ def xgb_algorithm(input_table, input_market):
         final_df = pd.concat([final_df, features_player_2], axis=1)
     final_df = final_df.fillna(0)
     try:
-        y_pred = xgb_predict(final_df, two_players)
-        return y_pred
+        y_pred, y_prob = xgb_predict(final_df, two_players)
+        return y_pred, y_prob
     except Exception as e:
         print("DEBUG: Error in xgb_predict:", e)
+
+def xgb_algorithm_plot(input_table, input_market, threshold):
+    setup_maps()
+    global market_name_map
+    global table_map
+    input_market_lower = input_market.lower()
+    is_polymarket = input_table.startswith('P_')
+
+    paired_table = table_map.get(input_table)
+    if not paired_table:
+        raise ValueError(f"Paired table not found for input table '{input_table}'.")
+
+    submap = market_name_map.get(input_table)
+    if not submap:
+        raise ValueError(f"Market mapping not found for table '{input_table}'.")
+    matches = get_close_matches(input_market_lower, list(submap.keys()), n=1, cutoff=0.6)
+    if not matches:
+        raise ValueError(f"Market '{input_market}' not found for table '{input_table}'.")
+    base_market = submap[matches[0]]
+
+    polymarket_table = paired_table if is_polymarket else input_table
+    kalshi_table = input_table if is_polymarket else paired_table
+
+    polymarket_market = base_market['polymarket']
+    kalshi_market = base_market['kalshi']
+    k_plot = plot_kalshi_data(kalshi_table, kalshi_market, 'yes')
+
+    # Recreate polymarket data
+    choice = 'yes'
+    df_polymarket = get_polymarket_df(polymarket_table, polymarket_market)
+    if choice == 'yes':
+        choice = 'yes_price'
+    else:
+        choice = 'no_price'
+    if df_polymarket is None or not isinstance(df_polymarket, pd.DataFrame) or df_polymarket.empty:
+        raise ValueError("Polymarket DataFrame is invalid or empty.")
+    
+    if choice not in df_polymarket.columns:
+        raise ValueError(f"Column '{choice}' not found in Polymarket DataFrame.")
+    
+    paper_bgcolor = 'white'  # Default background color
+
+    # Run the XGBoost algorithm to get predictions and probabilities
+    y_pred, y_prob = xgb_algorithm(kalshi_table, kalshi_market)
+
+    # Calculate the absolute difference between probabilities
+    prob_diff = abs(y_prob[0][0] - y_prob[0][1])
+
+    # Convert threshold to float (if not already)
+    threshold = float(threshold)
+
+    # Adjust the color logic based on the threshold and probability difference
+    if prob_diff < threshold:  # If the probability difference is small, it's more uncertain
+        # Suggesting more risk by taking "uptrend" or "downtrend"
+        if y_prob[0][0] > 0.5:  # If probability for uptrend is higher than 50%
+            paper_bgcolor = 'lightgreen'  # Light green for uptrend
+        elif y_prob[0][1] > 0.5:  # If probability for downtrend is higher than 50%
+            paper_bgcolor = 'lightcoral'  # Light red for downtrend
+        else:
+            paper_bgcolor = 'grey'  # Neutral color (e.g., grey)
+    else:  # If the probability difference is large, we're more confident about the prediction
+        if y_pred == 1:  # If predicted as uptrend (1)
+            paper_bgcolor = 'lightgreen'  # Light green for uptrend
+        elif y_pred == 0:  # If predicted as downtrend (0)
+            paper_bgcolor = 'lightcoral'  # Light red for downtrend
+    
+    prediction_label = convert_table_name_to_clean(polymarket_table)
+    market_label = convert_table_name_to_clean(polymarket_market)
+    fig = px.line(df_polymarket, x='timestamp', y=f'{choice}', title=f'Predict Poly for {market_label}')
+    fig.update_xaxes(
+        rangeslider_visible=True,
+        rangeselector=dict(
+            buttons=list([
+                dict(count=30, label="30s", step="second", stepmode="backward"), 
+                dict(count=1, label="1m", step="minute", stepmode="backward"), 
+                dict(count=1, label="1h", step="hour", stepmode="backward"), 
+                dict(count=1, label="1d", step="day", stepmode="backward"),
+                dict(step="all", label="To Date"),
+            ])
+        )
+    )
+    
+    fig.update_layout(
+        paper_bgcolor = paper_bgcolor,
+    )
+    p_plot = pio.to_html(fig, full_html=False, include_plotlyjs='cdn')
+
+    return p_plot, k_plot
 
 def convert_table_name_to_clean(name):
     return name.replace("P_", "").replace("K_", "").replace("_", " ").title()

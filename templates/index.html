@@ -10,7 +10,7 @@
     <div class="container">
         <!-- Consolidated Input Section -->
         <div class="market-section">
-            <h2>DIPAdvisors</h2>
+            <h2>ZipAdvisors</h2>
             <div class="input-section">
                 <h3>Inputs</h3>
                 <form id="input-form" method="post">
@@ -64,9 +64,14 @@
                                     <option value="">Select Visualization</option>
                                     <option value="show">Show The Data</option>
                                     <option value="volatility">Volatility Visualization</option>
-                                    <option value="xgboost">XGBoost</option>
+                                    <option value="xgboost">XGBoost - Predict Polymarket Movement</option>
                                 </select>
                             </div>
+                        </div>
+                        <div class="control-group">
+                            <div class="control-label">XGBoost Threshold</div>
+                            <input type="number" id="threshold" name="threshold" min="0" max="0.5" step="0.01" value="0.35">
+                            <label for="threshold"></label>
                         </div>
                         <button type="submit" name="submit" class="submit-btn">Apply</button>
                     </div>
