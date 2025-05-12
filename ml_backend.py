@@ -9,12 +9,19 @@ import plotly.express as px
 import plotly.io as pio
 import plotly.graph_objects as go
 import pymysql
-from xgboost import XGBClassifier
 import xgboost as xgb
+from difflib import get_close_matches
 pymysql.install_as_MySQLdb()
 
 model = xgb.XGBClassifier()
-model = model.load_model('Models/two_player_xgb.json')
+model = model.load_model('models/two_player_xgb.json')
+
+table_map = {
+
+}
+market_table_map = {
+
+}
 
 load_dotenv()
 DB_USER = os.getenv('DB_USER')
@@ -68,8 +75,140 @@ def get_market_names(table_name):
     market_names = pd.read_sql(f'SELECT DISTINCT market_name FROM {table_name}', con=engine)['market_name'].tolist()
     return market_names
 
-def merge_databases(P_prediction, K_prediction, P_market, K_market):
+def suggest_market_table_mapping(polymarket_tables, kalshi_tables):
+    mapping = {}
 
+    def clean(name):
+        return name.split('_', 1)[1].lower() if '_' in name else name.lower()
+
+    for p_table in polymarket_tables:
+        p_clean = clean(p_table)
+        best_k_match = get_close_matches(p_clean, [clean(k) for k in kalshi_tables], n=1, cutoff=0.5)
+        if best_k_match:
+            original_k_table = next(k for k in kalshi_tables if clean(k) == best_k_match[0])
+            mapping[p_table] = original_k_table
+
+    return mapping
+
+def generate_flat_market_name_map(table_pairs, cutoff=0.6):
+    """
+    Flattens the mapping so it works in get_team_market_data_for_xgb.
+    Returns: {
+        'denver_nuggets': {'polymarket': 'denver_nuggets', 'kalshi': 'denver'},
+        ...
+    }
+    """
+    from difflib import get_close_matches
+
+    flat_map = {}
+
+    for p_table, k_table in table_pairs.items():
+        query_p = f"SELECT DISTINCT market_name FROM {p_table}"
+        query_k = f"SELECT DISTINCT market_name FROM {k_table}"
+
+        p_markets = pd.read_sql(query_p, con=engine)['market_name'].dropna().unique()
+        k_markets = pd.read_sql(query_k, con=engine)['market_name'].dropna().unique()
+
+        k_cleaned = {name: name.lower() for name in k_markets}
+
+        for p_market in p_markets:
+            p_lower = p_market.lower()
+            match = get_close_matches(p_lower, k_cleaned.values(), n=1, cutoff=cutoff)
+            if match:
+                matched_k = next(k for k, v in k_cleaned.items() if v == match[0])
+                # Register mapping for both variants
+                flat_map[p_market.lower()] = {'polymarket': p_market, 'kalshi': matched_k}
+                flat_map[matched_k.lower()] = {'polymarket': p_market, 'kalshi': matched_k}
+
+    return flat_map
+
+def setup_maps():
+    table_names = get_table_names()
+    polymarket_tables = [name for name in table_names if name.startswith('P_')]
+    kalshi_tables = [name for name in table_names if name.startswith('K_')]
+    table_map = suggest_market_table_mapping(polymarket_tables, kalshi_tables)
+    market_name_map = generate_flat_market_name_map(table_map)
+    market_name_map
+
+def get_team_market_data_for_xgb(input_table, input_market):
+    # Use the global market_name_map and table_map
+    global market_name_map
+    global table_map
+
+    # Check if the input market is available in the map
+    if input_market.lower() not in market_name_map:
+        raise ValueError(f"Market name '{input_market}' not found in mapping.")
+
+    # Retrieve the market mapping for polymarket and kalshi
+    base_market = market_name_map[input_market.lower()]
+    
+    # Check if input_table is polymarket or kalshi
+    is_polymarket = input_table.startswith('P_')
+
+    # Map to appropriate tables
+    polymarket_table = input_table if is_polymarket else table_map[input_table]
+    kalshi_table = input_table if not is_polymarket else table_map[input_table]
+
+    # Retrieve market names for polymarket and kalshi
+    polymarket_market = base_market['polymarket']
+    kalshi_market = base_market['kalshi']
+
+    # Query Polymarket
+    query_p = f"""
+        SELECT market_name, yes_price, no_price, timestamp 
+        FROM {polymarket_table}
+        WHERE market_name LIKE %s 
+        ORDER BY timestamp DESC 
+        LIMIT 100
+    """
+    df_p = pd.read_sql(query_p, con=engine, params=(f'%{polymarket_market}%',))
+    df_p['timestamp'] = pd.to_datetime(df_p['timestamp']).dt.floor('min')
+    df_p = df_p.rename(columns={
+        'yes_price': 'polymarket_yes_price',
+        'no_price': 'polymarket_no_price'
+    }).sort_values('timestamp')
+
+    # Query Kalshi
+    query_k = f"""
+        SELECT market_name, yes_price, no_price, timestamp 
+        FROM {kalshi_table}
+        WHERE market_name LIKE %s 
+        ORDER BY timestamp DESC 
+        LIMIT 100
+    """
+    df_k = pd.read_sql(query_k, con=engine, params=(f'%{kalshi_market}%',))
+    df_k['timestamp'] = pd.to_datetime(df_k['timestamp']).dt.floor('min')
+    df_k = df_k.rename(columns={
+        'yes_price': 'kalshi_yes_price',
+        'no_price': 'kalshi_no_price'
+    }).sort_values('timestamp')
+
+
+    # Merge on rounded timestamp
+    merged = pd.merge(df_p, df_k, on='timestamp', how='outer').sort_values('timestamp')
+    merged = merged.ffill()
+
+    # Optional: Keep only last 30 combined rows
+    merged = merged.tail(30).reset_index(drop=True)
+
+    print(f"✅ Final merged shape: {merged.shape}")
+    return merged
+
+def xgb_algorithm():
+    
+
+
+
+
+
+
+
+
+
+
+
+
+def xgb_merge_databases(P_prediction, P_market, K_prediction, K_market):
     df_polymarket = get_polymarket_df(P_prediction, P_market)
     df_kalshi = get_kalshi_df(K_prediction, K_market)
 
@@ -100,7 +239,7 @@ def merge_databases(P_prediction, K_prediction, P_market, K_market):
 
     return df_combined
 
-def align_and_generate_features(df, lags=3, market=None):
+def align_and_generate_features(df, lags=3, player=None):
     """
     Enhances raw time-series features with engineered lag features, spread metrics, and momentum over longer time frames.
     Assumes:
@@ -108,7 +247,7 @@ def align_and_generate_features(df, lags=3, market=None):
     - columns like 'kalshi_yes_price', 'polymarket_yes_price' already exist and are numeric
     """
 
-    prefix = f"{market}_" if market else ""
+    prefix = f"{player}_" if player else ""
 
     # Compute base delta logs (1-step returns)
     df[f'{prefix}delta_log_kalshi_yes'] = np.log(df[f'{prefix}kalshi_yes_price']) - np.log(df[f'{prefix}kalshi_yes_price'].shift(1))
@@ -120,22 +259,27 @@ def align_and_generate_features(df, lags=3, market=None):
     df[f'{prefix}kalshi_spread'] = df[f'{prefix}kalshi_yes_price'] - df[f'{prefix}kalshi_no_price']
     df[f'{prefix}polymarket_spread'] = df[f'{prefix}polymarket_yes_price'] - df[f'{prefix}polymarket_no_price']
 
-    # Add longer-term engineered features (momentum, volatility, z-score)
-    df[f'{prefix}lag_momentum_polymarket_5'] = df[f'{prefix}delta_log_polymarket_yes'].rolling(5).sum().shift(1)
-    df[f'{prefix}lag_momentum_polymarket_10'] = df[f'{prefix}delta_log_polymarket_yes'].rolling(10).sum().shift(1)
+    # 1) momentum over the last 5 and 10, then shift so at t it's using [t-5 … t-1] and [t-10 … t-1]
+    df[f'{prefix}lag_momentum_5']  = df[f'{prefix}delta_log_polymarket_yes'] \
+                                        .rolling(5).sum() \
+                                        .shift(1)
+    df[f'{prefix}lag_momentum_10'] = df[f'{prefix}delta_log_polymarket_yes'] \
+                                        .rolling(10).sum() \
+                                        .shift(1)
 
-    df[f'{prefix}lag_volatility_polymarket_5'] = df[f'{prefix}delta_log_polymarket_yes'].rolling(5).std().shift(1)
-    df[f'{prefix}lag_volatility_polymarket_10'] = df[f'{prefix}delta_log_polymarket_yes'].rolling(10).std().shift(1)
+    # 2) volatility likewise
+    df[f'{prefix}lag_volatility_5']  = df[f'{prefix}delta_log_polymarket_yes'] \
+                                          .rolling(5).std() \
+                                          .shift(1)
+    df[f'{prefix}lag_volatility_10'] = df[f'{prefix}delta_log_polymarket_yes'] \
+                                          .rolling(10).std() \
+                                          .shift(1)
 
-     # Add longer-term engineered features (momentum, volatility, z-score)
-    df[f'{prefix}lag_momentum_kalshi_5'] = df[f'{prefix}delta_log_kalshi_yes'].rolling(5).sum().shift(1)
-    df[f'{prefix}lag_momentum_kalshi_10'] = df[f'{prefix}delta_log_kalshi_yes'].rolling(10).sum().shift(1)
-
-    df[f'{prefix}lag_volatility_kalshi_5'] = df[f'{prefix}delta_log_kalshi_yes'].rolling(5).std().shift(1)
-    df[f'{prefix}lag_volatility_kalshi_10'] = df[f'{prefix}delta_log_kalshi_yes'].rolling(10).std().shift(1)
-
-    rolling_mean = df[f'{prefix}delta_log_polymarket_yes'].rolling(10).mean().shift(1)
-    rolling_std = df[f'{prefix}delta_log_polymarket_yes'].rolling(10).std().shift(1)
+    # 3) z-score: compute (x_t - μ_t)/σ_t over window [t-9 … t], then shift so feature at t uses μ and σ up through t-1
+    z = (df[f'{prefix}delta_log_polymarket_yes']
+        - df[f'{prefix}delta_log_polymarket_yes'].rolling(10).mean()
+        ) / df[f'{prefix}delta_log_polymarket_yes'].rolling(10).std()
+    df[f'{prefix}lag_zscore_10'] = z.shift(1)
 
     # Create classic lag features (short-term memory)
     lagged_features = []
@@ -172,62 +316,89 @@ def align_and_generate_features(df, lags=3, market=None):
 
     return final_df
 
-# Label using rolling volatility filter: 1 = Buy (UP), 0 = Sell (DOWN)
-def label_with_volatility_filter(series, volatility_window=5, multiplier=0.5):
+def plot_player_prices(player, start_time, end_time, new_db_path, db_path):
     """
-    Labels only meaningful price movements using rolling volatility.
-    Args:
-    - series: the delta log price series
-    - volatility_window: how many past steps to use to compute local volatility
-    - multiplier: how 'strong' the move must be to count as a signal
-    Returns:
-    - target: Series with 1 = Buy, 0 = Sell, NaN = noise (optional to ffill)
+    Plots YES prices for a given player from both polymarket and kalshi databases.
+
+    Parameters:
+    - player: str, player name (e.g. 'rory_mcilroy')
+    - start_time: str, timestamp (e.g. '2025-04-12 18:25:00')
+    - end_time: str, timestamp (e.g. '2025-04-12 22:30:00')
+    - new_db_path: str, path to Polymarket SQLite DB
+    - db_path: str, path to Kalshi SQLite DB
     """
-    rolling_std = series.rolling(volatility_window).std()
+    plt.figure(figsize=(12, 6))
+    player_label = player.replace('_', ' ').title()
 
-    def assign_label(x, threshold):
-        if x > threshold:
-            return 1
-        elif x < -threshold:
-            return 0
-        else:
-            return np.nan  # Weak signal (optional: fill later)
+    # Plot from Polymarket DB
+    try:
+        conn_new = sqlite3.connect(new_db_path)
+        query_polymarket = f"""
+            SELECT timestamp, yes_price, no_price
+            FROM {player}
+            WHERE timestamp BETWEEN '{start_time}' AND '{end_time}'
+            ORDER BY timestamp
+        """
+        df_polymarket = pd.read_sql_query(query_polymarket, conn_new)
+        df_polymarket['timestamp'] = pd.to_datetime(df_polymarket['timestamp'])
+        #plt.plot(df_polymarket['timestamp'], df_polymarket['yes_price'],
+                 #label=f'{player_label} Yes Price (Polymarket)', marker='o', linestyle='-')
+        conn_new.close()
+    except Exception as e:
+        print(f"❌ Error loading Polymarket data for {player}: {e}")
 
-    thresholds = rolling_std * multiplier
-    labels = series.combine(thresholds, assign_label)
+    # Plot from Kalshi DB
+    try:
+        conn_old = sqlite3.connect(db_path)
+        query_kalshi = f"""
+            SELECT timestamp, yes_price, no_price
+            FROM {player + "_merged"}
+            WHERE timestamp BETWEEN '{start_time}' AND '{end_time}'
+            ORDER BY timestamp
+        """
+        df_kalshi = pd.read_sql_query(query_kalshi, conn_old)
+        df_kalshi['timestamp'] = pd.to_datetime(df_kalshi['timestamp'])
+        #plt.plot(df_kalshi['timestamp'], df_kalshi['yes_price'],
+                 #label=f'{player_label} Yes Price (Kalshi)', marker='x', linestyle='--')
+        conn_old.close()
+    except Exception as e:
+        print(f"❌ Error loading Kalshi data for {player}: {e}")
 
-    def assign_sell_label(x, threshold):
-        if x < -threshold:
-            return 1
-        else:
-            return 0
-    def assign_buy_label(x, threshold):
-        if x > threshold:
-            return 1
-        else:
-            return 0
+    #plt.xlabel("Timestamp")
+    #plt.ylabel("Yes Price")
+    #plt.title(f"YES Contract Price for {player_label}")
+    #plt.legend()
+    #plt.grid(True)
+    #plt.tight_layout()
+    #plt.show()
 
-    thresholds = rolling_std * multiplier
+    #rename each column to it's relevant polymarket_kalshi_prefix (except timestamp)
+    df_polymarket = df_polymarket.rename(columns={col: f'polymarket_{col}' for col in df_polymarket.columns if col != 'timestamp'})
+    df_kalshi = df_kalshi.rename(columns={col: f'kalshi_{col}' for col in df_kalshi.columns if col != 'timestamp'})
 
-    return labels
+    df_polymarket['timestamp'] = pd.to_datetime(df_polymarket['timestamp'])
+    df_kalshi['timestamp'] = pd.to_datetime(df_kalshi['timestamp'])
 
-# Where the inputs from the frontend are going to be
-def plot_merged_data():
-    P_prediction = 'P_nba_western_conference_champion'
-    P_market = 'denver_nuggets'
-    K_prediction = 'K_nba_western_conference_championship'
-    K_market = 'denver'
+    df_polymarket.set_index('timestamp', inplace=True)
+    df_kalshi.set_index('timestamp', inplace=True)
 
-    df_market = merge_databases(P_prediction, K_prediction, P_market, K_market)
-    df_market = df_market.rename(columns={col: f'{P_market}_{col}' for col in df_market.columns if col != 'timestamp'})
-    df_market = align_and_generate_features(df_market, 5, P_market) # number of lags is second
-    df_market['timestamp'] = df_market.index
+    # Create a common time index (e.g., 1-minute intervals)
+    common_index = pd.date_range(
+      start=max(df_polymarket.index.min(), df_kalshi.index.min()),
+      end=min(df_polymarket.index.max(), df_kalshi.index.max()),
+      freq='20S'  # or whatever granularity you want
+    )
 
-    if df_market is not None:
-        df_market.set_index('timestamp', inplace=True)
+    # Reindex both DataFrames and interpolate
+    df_polymarket = df_polymarket.reindex(common_index).ffill()
+    df_kalshi = df_kalshi.reindex(common_index).ffill()
 
-    # Drop rows with any missing values (optional)
-    df_market = df_market.dropna()
+    df_combined = pd.concat([df_polymarket, df_kalshi], axis=1)
+    df_combined = df_combined.reset_index().rename(columns={'index': 'timestamp'})
+    df_combined = df_combined.dropna()
+    return df_combined
+
+
 
 def plot_polymarket_data(P_prediction, P_market, choice):
     if choice == 'yes':
@@ -291,7 +462,6 @@ def plot_kalshi_data(K_prediction, K_market, choice):
     )
     return pio.to_html(fig, full_html=False, include_plotlyjs='cdn', include_mathjax=False)
 
-
 def convert_table_name_to_clean(name):
     return name.replace("P_", "").replace("K_", "").replace("_", " ").title()
 
@@ -348,6 +518,64 @@ def plot_kalshi_volatility(K_prediction, K_market, window=12):
     fig.add_trace(go.Scatter(
         x=df_kalshi['timestamp'],
         y=df_kalshi['volatility'],
+        mode='lines',
+        name=f'Volatility (Rolling {window})',
+        line=dict(color='orange', dash='dot', width=2),
+        opacity=0.5,
+        yaxis='y2'
+    ))
+
+    # Layout with dual y-axes
+    fig.update_layout(
+        title=f"Kalshi YES Price and Volatility — {prediction_label} / {market_label}",
+        xaxis=dict(
+            title='Timestamp',
+            rangeslider=dict(visible=True),
+            rangeselector=dict(
+                buttons=list([
+                    dict(count=1, label="1m", step="month", stepmode="backward"),
+                    dict(count=6, label="6m", step="month", stepmode="backward"),
+                    dict(count=1, label="YTD", step="year", stepmode="todate"),
+                    dict(count=1, label="1y", step="year", stepmode="backward"),
+                    dict(step="all")
+                ])
+            )
+        ),
+        yaxis=dict(title='YES Price', side='left'),
+        yaxis2=dict(title='Volatility', overlaying='y', side='right', showgrid=False),
+        legend=dict(x=0, y=1),
+        height=600,
+        template='plotly_white'
+    )
+
+    return pio.to_html(fig, full_html=False, include_plotlyjs='cdn')
+
+def plot_polymarket_volatility(P_prediction, P_market, window=12):
+    # Load and prepare data
+    df_polymarket = get_kalshi_df(P_prediction, P_market)
+    df_polymarket = df_polymarket.sort_values("timestamp")
+    df_polymarket['volatility'] = df_polymarket['yes_price'].rolling(window=window).std()
+
+    # Labels
+    prediction_label = convert_table_name_to_clean(P_prediction)
+    market_label = convert_table_name_to_clean(P_market)
+
+    # Build figure
+    fig = go.Figure()
+
+    # YES price (primary axis)
+    fig.add_trace(go.Scatter(
+        x=df_polymarket['timestamp'],
+        y=df_polymarket['yes_price'],
+        mode='lines',
+        name='YES Price',
+        line=dict(color='blue')
+    ))
+
+    # Volatility (secondary axis, faint color)
+    fig.add_trace(go.Scatter(
+        x=df_polymarket['timestamp'],
+        y=df_polymarket['volatility'],
         mode='lines',
         name=f'Volatility (Rolling {window})',
         line=dict(color='orange', dash='dot', width=2),
