@@ -11,6 +11,8 @@ import plotly.graph_objects as go
 import pymysql
 import xgboost as xgb
 from difflib import get_close_matches
+from difflib import SequenceMatcher
+import random 
 pymysql.install_as_MySQLdb()
 
 model = xgb.XGBClassifier()
@@ -156,8 +158,8 @@ def get_team_market_data_for_xgb(input_table, input_market):
     df_p = pd.read_sql(query_p, con=engine, params=(f'%{polymarket_market}%',))
     df_p['timestamp'] = pd.to_datetime(df_p['timestamp'])
     df_p = df_p.rename(columns={
-        'yes_price': 'polymarket_yes_price',
-        'no_price': 'polymarket_no_price'
+        'yes_price': f'{input_market}_polymarket_yes_price',
+        'no_price': f'{input_market}_polymarket_no_price'
     }).sort_values('timestamp')
     df_p = df_p.tail(30).reset_index(drop=True)
 
@@ -172,41 +174,195 @@ def get_team_market_data_for_xgb(input_table, input_market):
     df_k = pd.read_sql(query_k, con=engine, params=(f'%{kalshi_market}%',))
     df_k['timestamp'] = pd.to_datetime(df_k['timestamp'])
     df_k = df_k.rename(columns={
-        'yes_price': 'kalshi_yes_price',
-        'no_price': 'kalshi_no_price'
+        'yes_price': f'{input_market}_kalshi_yes_price',
+        'no_price': f'{input_market}_kalshi_no_price'
     }).sort_values('timestamp')
     df_k = df_k.tail(30).reset_index(drop=True)
 
     print(f"✅ Polymarket shape: {df_p.shape}, Kalshi shape: {df_k.shape}")
     return df_p, df_k
 
+def align_and_generate_features(df, lags=3, player=None):
+    print("DEBUG: Entered align_and_generate_features")
+    prefix = f"{player}_" if player else ""
+    print(f"DEBUG: Using prefix: '{prefix}'")
+
+    # Compute base delta logs (1-step returns)
+    df[f'{prefix}delta_log_kalshi_yes'] = np.log(df[f'{prefix}kalshi_yes_price']) - np.log(df[f'{prefix}kalshi_yes_price'].shift(1))
+    df[f'{prefix}delta_log_kalshi_no'] = np.log(df[f'{prefix}kalshi_no_price']) - np.log(df[f'{prefix}kalshi_no_price'].shift(1))
+    df[f'{prefix}delta_log_polymarket_yes'] = np.log(df[f'{prefix}polymarket_yes_price']) - np.log(df[f'{prefix}polymarket_yes_price'].shift(1))
+    df[f'{prefix}delta_log_polymarket_no'] = np.log(df[f'{prefix}polymarket_no_price']) - np.log(df[f'{prefix}polymarket_no_price'].shift(1))
+    print("DEBUG: Computed delta logs")
+
+    # Compute spreads
+    df[f'{prefix}kalshi_spread'] = df[f'{prefix}kalshi_yes_price'] - df[f'{prefix}kalshi_no_price']
+    df[f'{prefix}polymarket_spread'] = df[f'{prefix}polymarket_yes_price'] - df[f'{prefix}polymarket_no_price']
+    print("DEBUG: Computed spreads")
+
+    # Momentum features
+    df[f'{prefix}lag_momentum_5']  = df[f'{prefix}delta_log_polymarket_yes'].rolling(5).sum().shift(1)
+    df[f'{prefix}lag_momentum_10'] = df[f'{prefix}delta_log_polymarket_yes'].rolling(10).sum().shift(1)
+    print("DEBUG: Computed momentum features")
+
+    # Volatility features
+    df[f'{prefix}lag_volatility_5']  = df[f'{prefix}delta_log_polymarket_yes'].rolling(5).std().shift(1)
+    df[f'{prefix}lag_volatility_10'] = df[f'{prefix}delta_log_polymarket_yes'].rolling(10).std().shift(1)
+    print("DEBUG: Computed volatility features")
+
+    # Z-score features
+    z = (df[f'{prefix}delta_log_polymarket_yes'] - df[f'{prefix}delta_log_polymarket_yes'].rolling(10).mean()) / df[f'{prefix}delta_log_polymarket_yes'].rolling(10).std()
+    df[f'{prefix}lag_zscore_10'] = z.shift(1)
+    print("DEBUG: Computed z-score feature")
+
+    # Create classic lag features (short-term memory)
+    lagged_features = []
+    lagged_columns = []
+    for i in range(1, lags + 1):
+        for col_base in [
+            f'{prefix}delta_log_kalshi_yes',
+            f'{prefix}delta_log_kalshi_no',
+            f'{prefix}delta_log_polymarket_yes',
+            f'{prefix}delta_log_polymarket_no'
+        ]:
+            lagged_col = df[col_base].shift(i-1)
+            lagged_features.append(lagged_col)
+            lagged_columns.append(f'{prefix}lag_{i}_' + col_base.split(prefix)[-1])
+    print("DEBUG: Created lag features for columns:", lagged_columns)
+
+    lagged_df = pd.concat(lagged_features, axis=1)
+    lagged_df.columns = lagged_columns
+
+    # Drop rows with missing values in required columns
+    required_cols = [
+        f'{prefix}delta_log_kalshi_yes',
+        f'{prefix}delta_log_kalshi_no',
+        f'{prefix}delta_log_polymarket_yes',
+        f'{prefix}delta_log_polymarket_no'
+    ]
+    df = df.dropna(subset=required_cols)
+    print("DEBUG: Dropped rows with NA in required columns, new shape:", df.shape)
+
+    # Align with lagged_df
+    lagged_df = lagged_df.loc[df.index].dropna()
+    print("DEBUG: Aligned lagged_df shape:", lagged_df.shape)
+
+    # Merge everything into one DataFrame
+    final_df = pd.concat([df, lagged_df], axis=1).dropna()
+    print("DEBUG: Final feature dataframe shape:", final_df.shape)
+
+    return final_df
+
+def xgb_predict(final_df, key_players):
+    print("DEBUG: Entered xgb_predict")
+    df_features = final_df.copy()
+    # === Select only lagged features
+    lag_cols = [col for col in df_features.columns if 'lag_' in col]
+    print("DEBUG: Initial lag feature columns:", lag_cols)
+    X = df_features[lag_cols]
+
+    # Normalize column names for model consistency
+    rename_mapping = {}
+    for idx, player in enumerate(key_players, start=1):
+        for col in df_features.columns:
+            if col.startswith(player + '_'):
+                new_col = col.replace(player + '_', f'Player{idx}_')
+                rename_mapping[col] = new_col
+    print("DEBUG: Rename mapping:", rename_mapping)
+    X = X.rename(columns=rename_mapping)
+    print("DEBUG: Renamed feature columns:", X.columns.tolist())
+
+    try:
+        y_pred = model.predict(X)[0]
+        print("DEBUG: Model prediction successful, y_pred:", y_pred)
+    except Exception as e:
+        print("DEBUG: Error during model prediction:", e)
+        raise e
+
+def get_random_dissimilar_market(input_table, input_market, threshold=0.6):
+    print("DEBUG: Entered get_random_dissimilar_market with input_market:", input_market)
+    input_market_lower = input_market.lower()
+    all_markets = market_name_map.get(input_table, {}).keys()
+    dissimilar_markets = [
+        market for market in all_markets
+        if SequenceMatcher(None, market, input_market_lower).ratio() < threshold
+    ]
+    print("DEBUG: Found dissimilar markets:", dissimilar_markets)
+    if not dissimilar_markets:
+        raise ValueError("No sufficiently dissimilar markets found.")
+    chosen = random.choice(dissimilar_markets)
+    print("DEBUG: Chosen dissimilar market:", chosen)
+    return chosen
+
 def xgb_algorithm(input_table, input_market):
-
-    two_players = [input_market, "denver_nuggets"]
-
+    print("DEBUG: Entered xgb_algorithm with input_table:", input_table, "and input_market:", input_market)
+    second_market = get_random_dissimilar_market(input_table, input_market)
+    two_players = [input_market, second_market]
+    print("DEBUG: Two players markets:", two_players)
 
     mergedP, mergedK = get_team_market_data_for_xgb(input_table, input_market)
     merged2P, merged2K = get_team_market_data_for_xgb(input_table, two_players[1])
+    print("DEBUG: Fetched team market data")
+
+    # Convert timestamps
+    for df in [mergedP, mergedK, merged2P, merged2K]:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df.set_index('timestamp', inplace=True)
+    print("DEBUG: Converted and set timestamps as index")
+
+    # Create a common time index
+    start = max(df.index.min() for df in [mergedP, mergedK, merged2P, merged2K])
+    end = min(df.index.max() for df in [mergedP, mergedK, merged2P, merged2K])
+    common_index = pd.date_range(start=start, end=end, freq='20S')
+    print("DEBUG: Constructed common index from", start, "to", end)
+
+    # Reindex and forward fill
+    dfs = [df.reindex(common_index).ffill() for df in [mergedP, mergedK, merged2P, merged2K]]
+    print("DEBUG: Reindexed dataframes with common index")
+
+    # Combine player 1 data (Polymarket + Kalshi)
+    player1_df = pd.concat([mergedP, mergedK], axis=1)
+    player1_df = player1_df.loc[~player1_df.index.duplicated(keep='first')]
+    print("DEBUG: Player 1 dataframe shape:", player1_df.shape)
+
+    # Combine player 2 data (Polymarket + Kalshi)
+    player2_df = pd.concat([merged2P, merged2K], axis=1)
+    player2_df = player2_df.loc[~player2_df.index.duplicated(keep='first')]
+    print("DEBUG: Player 2 dataframe shape:", player2_df.shape)
+
+    # Create a common time index for both players
+    start = max(player1_df.index.min(), player2_df.index.min())
+    end = min(player1_df.index.max(), player2_df.index.max())
+    common_index = pd.date_range(start=start, end=end, freq='20S')
+    print("DEBUG: New common index for players from", start, "to", end)
+
+    # Reindex and forward fill
+    player1_df = player1_df.reindex(common_index).ffill()
+    player2_df = player2_df.reindex(common_index).ffill()
+    print("DEBUG: Reindexed both player dataframes")
+
+    final_df = pd.DataFrame()
+
+    features_player_1 = align_and_generate_features(player1_df, 3, input_market)
+    if features_player_1 is not None:
+        features_player_1.set_index('timestamp', inplace=True)
+        final_df = pd.concat([final_df, features_player_1], axis=1)
+        print("DEBUG: Added features for player 1, shape:", features_player_1.shape)
+
+    features_player_2 = align_and_generate_features(player2_df, 3, two_players[1])
+    if features_player_2 is not None:
+        features_player_2.set_index('timestamp', inplace=True)
+        final_df = pd.concat([final_df, features_player_2], axis=1)
+        print("DEBUG: Added features for player 2, shape:", features_player_2.shape)
+
+    final_df = final_df.dropna()
+    print("DEBUG: Final combined dataframe shape after dropna:", final_df.shape)
     
-    df_final = pd.DataFrame()
-
-    df_temp_1 = align_and_generate_features(merged, lags=3, two_players[0])
-    df_temp_1['timestamp']
-    
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
+    # Predict using the model
+    try:
+        xgb_predict(final_df, two_players)
+        print("DEBUG: xgb_predict executed successfully")
+    except Exception as e:
+        print("DEBUG: Error in xgb_predict:", e)
 
 def xgb_merge_databases(P_prediction, P_market, K_prediction, K_market):
     df_polymarket = get_polymarket_df(P_prediction, P_market)
@@ -232,89 +388,11 @@ def xgb_merge_databases(P_prediction, P_market, K_prediction, K_market):
     # Reindex both DataFrames and interpolate
     df_polymarket = df_polymarket.reindex(common_index).ffill()
     df_kalshi = df_kalshi.reindex(common_index).ffill()
-
     df_combined = pd.concat([df_polymarket, df_kalshi], axis=1)
     df_combined = df_combined.reset_index().rename(columns={'index': 'timestamp'})
     df_combined = df_combined.dropna()
 
     return df_combined
-
-def align_and_generate_features(df, lags=3, player=None):
-    """
-    Enhances raw time-series features with engineered lag features, spread metrics, and momentum over longer time frames.
-    Assumes:
-    - df is indexed by timestamp
-    - columns like 'kalshi_yes_price', 'polymarket_yes_price' already exist and are numeric
-    """
-
-    prefix = f"{player}_" if player else ""
-
-    # Compute base delta logs (1-step returns)
-    df[f'{prefix}delta_log_kalshi_yes'] = np.log(df[f'{prefix}kalshi_yes_price']) - np.log(df[f'{prefix}kalshi_yes_price'].shift(1))
-    df[f'{prefix}delta_log_kalshi_no'] = np.log(df[f'{prefix}kalshi_no_price']) - np.log(df[f'{prefix}kalshi_no_price'].shift(1))
-    df[f'{prefix}delta_log_polymarket_yes'] = np.log(df[f'{prefix}polymarket_yes_price']) - np.log(df[f'{prefix}polymarket_yes_price'].shift(1))
-    df[f'{prefix}delta_log_polymarket_no'] = np.log(df[f'{prefix}polymarket_no_price']) - np.log(df[f'{prefix}polymarket_no_price'].shift(1))
-
-    # Compute spreads
-    df[f'{prefix}kalshi_spread'] = df[f'{prefix}kalshi_yes_price'] - df[f'{prefix}kalshi_no_price']
-    df[f'{prefix}polymarket_spread'] = df[f'{prefix}polymarket_yes_price'] - df[f'{prefix}polymarket_no_price']
-
-    # 1) momentum over the last 5 and 10, then shift so at t it's using [t-5 … t-1] and [t-10 … t-1]
-    df[f'{prefix}lag_momentum_5']  = df[f'{prefix}delta_log_polymarket_yes'] \
-                                        .rolling(5).sum() \
-                                        .shift(1)
-    df[f'{prefix}lag_momentum_10'] = df[f'{prefix}delta_log_polymarket_yes'] \
-                                        .rolling(10).sum() \
-                                        .shift(1)
-
-    # 2) volatility likewise
-    df[f'{prefix}lag_volatility_5']  = df[f'{prefix}delta_log_polymarket_yes'] \
-                                          .rolling(5).std() \
-                                          .shift(1)
-    df[f'{prefix}lag_volatility_10'] = df[f'{prefix}delta_log_polymarket_yes'] \
-                                          .rolling(10).std() \
-                                          .shift(1)
-
-    # 3) z-score: compute (x_t - μ_t)/σ_t over window [t-9 … t], then shift so feature at t uses μ and σ up through t-1
-    z = (df[f'{prefix}delta_log_polymarket_yes']
-        - df[f'{prefix}delta_log_polymarket_yes'].rolling(10).mean()
-        ) / df[f'{prefix}delta_log_polymarket_yes'].rolling(10).std()
-    df[f'{prefix}lag_zscore_10'] = z.shift(1)
-
-    # Create classic lag features (short-term memory)
-    lagged_features = []
-    lagged_columns = []
-
-    for i in range(1, lags + 1):
-        for col_base in [
-            f'{prefix}delta_log_kalshi_yes',
-            f'{prefix}delta_log_kalshi_no',
-            f'{prefix}delta_log_polymarket_yes',
-            f'{prefix}delta_log_polymarket_no'
-        ]:
-            lagged_col = df[col_base].shift(i)
-            lagged_features.append(lagged_col)
-            lagged_columns.append(f'{prefix}lag_{i}_' + col_base.split(prefix)[-1])
-
-    lagged_df = pd.concat(lagged_features, axis=1)
-    lagged_df.columns = lagged_columns
-
-    # Drop rows with missing values in required columns
-    required_cols = [
-        f'{prefix}delta_log_kalshi_yes',
-        f'{prefix}delta_log_kalshi_no',
-        f'{prefix}delta_log_polymarket_yes',
-        f'{prefix}delta_log_polymarket_no'
-    ]
-    df = df.dropna(subset=required_cols)
-
-    # Align with lagged_df
-    lagged_df = lagged_df.loc[df.index].dropna()
-
-    # Merge everything into one DataFrame
-    final_df = pd.concat([df, lagged_df], axis=1).dropna()
-
-    return final_df
 
 def plot_polymarket_data(P_prediction, P_market, choice):
     if choice == 'yes':
