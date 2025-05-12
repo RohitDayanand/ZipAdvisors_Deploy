@@ -274,6 +274,7 @@ def xgb_predict(final_df, key_players):
     try:
         y_pred = model.predict(X)[0]
         print("DEBUG: Model prediction successful, y_pred:", y_pred)
+        return y_pred
     except Exception as e:
         print("DEBUG: Error during model prediction:", e)
         raise e
@@ -359,8 +360,9 @@ def xgb_algorithm(input_table, input_market):
     
     # Predict using the model
     try:
-        xgb_predict(final_df, two_players)
+        y_pred = xgb_predict(final_df, two_players)
         print("DEBUG: xgb_predict executed successfully")
+        return y_pred
     except Exception as e:
         print("DEBUG: Error in xgb_predict:", e)
 
