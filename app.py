@@ -1,12 +1,10 @@
 from flask import Flask, request, render_template, jsonify
-from ml_backend import prediction_dropdowns, market_dropdowns, plot_kalshi_data, plot_polymarket_data, plot_kalshi_volatility
+from ml_backend import prediction_dropdowns, market_dropdowns, plot_kalshi_data, plot_polymarket_data, plot_kalshi_volatility, plot_polymarket_volatility
 from flask_cors import CORS
 from datetime import datetime
-import os
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for frontend requests
-
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
@@ -54,11 +52,17 @@ def index():
                     kalshi_url = plot_kalshi_data(select_market, prediction_market, choice)
                 elif algo == "volatility":
                     kalshi_url = plot_kalshi_volatility(select_market, prediction_market)
+                elif algo == "xgboost":
+                    return
                 # Additional Kalshi options here
 
             elif market_type == "polymarket":
                 if algo == "show":
                     polymarket_url = plot_polymarket_data(select_market, prediction_market, choice)
+                elif algo == "volatility":
+                    polymarket_url = plot_polymarket_volatility(select_market, prediction_market)
+                elif algo == "xgboost":
+                    return
                 # Additional Polymarket options here
 
         except Exception as e:
@@ -75,6 +79,4 @@ def index():
             polymarket_url=polymarket_url
         )
 if __name__ == '__main__':
-  
-    port = int(os.environ.get("PORT", 5000))  # Railway sets this env var
-    app.run(host="0.0.0.0", port=port)
+    app.run(debug=True)
