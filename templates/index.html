@@ -10,7 +10,7 @@
     <div class="container">
         <!-- Consolidated Input Section -->
         <div class="market-section">
-            <h2>ZipAdvisors</h2>
+            <h2>DIPAdvisors</h2>
             <div class="input-section">
                 <h3>Inputs</h3>
                 <form id="input-form" method="post">
@@ -68,8 +68,6 @@
                                 </select>
                             </div>
                         </div>
-                        <input type="hidden" name="existing_kalshi_url" value="{{ kalshi_url|default('')|tojson|safe }}">
-                        <input type="hidden" name="existing_polymarket_url" value="{{ polymarket_url|default('')|tojson|safe }}">
                         <button type="submit" name="submit" class="submit-btn">Apply</button>
                     </div>
                 </form>
@@ -118,6 +116,38 @@
     </div>
     
     <script>
+    document.addEventListener("DOMContentLoaded", function () {
+        const algoSelect = document.getElementById("algo-select");
+        const kalshiOption = document.createElement("option");
+        kalshiOption.value = "xgboost";
+        kalshiOption.textContent = "XGBoost";
+
+        const marketRadios = document.querySelectorAll('input[name="market"]');
+
+        function updateAlgoOptions() {
+            const selectedMarket = document.querySelector('input[name="market"]:checked').value;
+
+            // Remove XGBoost if it exists
+            [...algoSelect.options].forEach(option => {
+                if (option.value === "xgboost") {
+                    algoSelect.removeChild(option);
+                }
+            });
+
+            // Add XGBoost only if Kalshi is selected
+            if (selectedMarket === "kalshi") {
+                algoSelect.appendChild(kalshiOption);
+            }
+        }
+
+        // Attach event listeners to radio buttons
+        marketRadios.forEach(radio => {
+            radio.addEventListener("change", updateAlgoOptions);
+        });
+
+        // Initial call to set the correct options
+        updateAlgoOptions();
+    });
     let currentSource = 'K_'; // Default is Kalshi
     function updateMarketDropdown() {
         const marketSelect = document.getElementById("market-select");

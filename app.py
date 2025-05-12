@@ -1,5 +1,7 @@
 from flask import Flask, request, render_template, jsonify
-from ml_backend import prediction_dropdowns, market_dropdowns, plot_kalshi_data, plot_polymarket_data, plot_kalshi_volatility, plot_polymarket_volatility
+from ml_backend import prediction_dropdowns, market_dropdowns
+from ml_backend import plot_kalshi_data, plot_polymarket_data
+from ml_backend import plot_kalshi_volatility, plot_polymarket_volatility
 from flask_cors import CORS
 from datetime import datetime
 from ml_backend import xgb_algorithm
@@ -43,10 +45,6 @@ def index():
         choice = form_data.get("choice")
         select_market = form_data.get("select-market")
         prediction_market = form_data.get("prediction-market")
-
-        # Load existing plotly HTML from hidden inputs
-        kalshi_url = form_data.get("existing_kalshi_url")
-        polymarket_url = form_data.get("existing_polymarket_url")
 
         try:
             if market_type == "kalshi":
