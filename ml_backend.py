@@ -277,7 +277,6 @@ def setup_maps():
 def get_team_market_data_for_xgb(input_table, input_market):
     global market_name_map
     global table_map
-
     try:
         input_market_lower = input_market.lower()
         is_polymarket = input_table.startswith('P_')
@@ -378,16 +377,6 @@ def align_and_generate_features(df, lags=3, player=None):
             np.log(df[f'{prefix}polymarket_no_price']) - np.log(df[f'{prefix}polymarket_no_price'].shift(1))
         )
 
-        print("delta_log_kalshi_yes:\n", df[f'{prefix}delta_log_kalshi_yes'].head())
-        print("delta_log_kalshi_no:\n", df[f'{prefix}delta_log_kalshi_no'].head())
-        print("delta_log_polymarket_yes:\n", df[f'{prefix}delta_log_polymarket_yes'].head())
-        print("delta_log_polymarket_no:\n", df[f'{prefix}delta_log_polymarket_no'].head())
-
-        # The presence of NaNs beyond the first values is due to the use of rolling windows and shifting.
-        # For example, rolling(5) requires at least 5 values to compute the first result, so the first 4 will be NaN.
-        # Similarly, shifting by 1 introduces NaN at the start.
-        # When you chain rolling().sum().shift(1), you get NaNs for the first (window) values.
-
         df[f'{prefix}kalshi_spread'] = df[f'{prefix}kalshi_yes_price'] - df[f'{prefix}kalshi_no_price']
         df[f'{prefix}polymarket_spread'] = df[f'{prefix}polymarket_yes_price'] - df[f'{prefix}polymarket_no_price']
 
@@ -400,10 +389,6 @@ def align_and_generate_features(df, lags=3, player=None):
         z = (df[f'{prefix}delta_log_polymarket_yes'] - df[f'{prefix}delta_log_polymarket_yes'].rolling(10).mean()) / df[f'{prefix}delta_log_polymarket_yes'].rolling(10).std()
         df[f'{prefix}lag_zscore_10'] = z.shift(1)
 
-        #print("My relevant columns", df.columns)
-        #print("My relevant head", df.head())
-        #print("My relevant tail", df.tail())
-
         # Fill NaNs that result from rolling and shifting with 0 (or you can use another method if preferred)
         cols_to_fill = [
             f'{prefix}lag_momentum_5',
@@ -413,7 +398,6 @@ def align_and_generate_features(df, lags=3, player=None):
             f'{prefix}lag_zscore_10'
         ]
         df[cols_to_fill] = df[cols_to_fill].fillna(0)
-
 
         try:
             lagged_features = []
@@ -431,53 +415,34 @@ def align_and_generate_features(df, lags=3, player=None):
             lagged_df.columns = lagged_columns
         except Exception as e:
             raise e
-        
-        print("Right before I drop to requiredShapes I am", df.shape, lagged_df.shape)
-
-        print("Right after I drop to requiredShapes I am", df.shape, lagged_df.shape)
 
         try:
             final_df = pd.concat([df, lagged_df], axis=1)
         except Exception as e:
             raise e
-        
-        print("Right after I drop to requiredShapes I am", df.shape, lagged_df.shape)
         return final_df
     except Exception as overall_e:
         raise overall_e
 
 def xgb_predict(final_df, key_players):
-    #print("DEBUG: Entered xgb_predict")
     df_features = final_df.copy()
     lag_cols = [col for col in df_features.columns if 'lag_' in col]
-    #print("DEBUG: Initial lag feature columns:", lag_cols)
-    print(df_features.columns)
-    print(df_features.shape)
 
     X = df_features[lag_cols]
     rename_mapping = {}
-    print("In XGB Predict after I drop to requiredShapes I am", X.shape)
     for idx, player in enumerate(key_players, start=1):
         for col in df_features.columns:
             if (col.startswith(player + '_')):
                 new_col = col.replace(player + '_', f'Player{idx}_')
                 rename_mapping[col] = new_col
-    #print("DEBUG: Rename mapping:", rename_mapping)
-    print("In XGB Predict after I drop #2 to requiredShapes I am", X.shape)
     X = X.rename(columns=rename_mapping)
-    print("In XGB Predict after I drop #3 to requiredShapes I am", X.shape)
 
-    #print("DEBUG: Renamed feature columns:", X.columns.tolist())
     model = xgb.XGBClassifier()
     model.load_model('./Models/two_player_xgb.json')
     feature_order = model.get_booster().feature_names
-    print("Feature orders:", feature_order)  # list of features in the correct order
-    print("X columns:", X.columns)
-    print("Right before I predict, my x is " ,X.shape, X.head(), X.tail(), X.info())
     try:
         y_pred = model.predict(X)[0]
         y_prob = model.predict_proba(X)
-        print("DEBUG: Model prediction successful, y_pred:", y_pred, y_prob)
         return y_pred
     except Exception as e:
         print("DEBUG: Error during model prediction:", e)
@@ -515,23 +480,14 @@ def xgb_algorithm(input_table, input_market):
     player1_df = player1_df.loc[~player1_df.index.duplicated(keep='first')]
     player2_df = pd.concat([merged2P, merged2K], axis=1)
     player2_df = player2_df.loc[~player2_df.index.duplicated(keep='first')]
-
-    print(player2_df.head(), player2_df.tail())
-    print(player1_df.head(), player1_df.tail())
-
     final_df = pd.DataFrame()
     features_player_1 = align_and_generate_features(player1_df, 3, input_market)
-    print("FP1 Cols: ", features_player_1.columns)
     if features_player_1 is not None:
         final_df = pd.concat([final_df, features_player_1], axis=1)
     features_player_2 = align_and_generate_features(player2_df, 3, two_players[1])
-    print("FP2 Cols: ", features_player_2.columns)
     if features_player_2 is not None:
         final_df = pd.concat([final_df, features_player_2], axis=1)
     final_df = final_df.fillna(0)
-    print("THIS IS BEFORE WE CALL XGB PREDICT")
-    print(final_df.shape)
-    print(final_df.head())
     try:
         y_pred = xgb_predict(final_df, two_players)
         return y_pred

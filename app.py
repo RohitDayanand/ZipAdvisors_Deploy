@@ -56,16 +56,12 @@ def index():
                     kalshi_url = plot_kalshi_volatility(select_market, prediction_market)
                 elif algo == "xgboost":
                     print(xgb_algorithm(select_market, prediction_market))
-                # Additional Kalshi options here
 
             elif market_type == "polymarket":
                 if algo == "show":
                     polymarket_url = plot_polymarket_data(select_market, prediction_market, choice)
                 elif algo == "volatility":
                     polymarket_url = plot_polymarket_volatility(select_market, prediction_market)
-                elif algo == "xgboost":
-                    print(xgb_algorithm(select_market, prediction_market))
-                # Additional Polymarket options here
 
         except Exception as e:
             # Display the error in place of the plot
