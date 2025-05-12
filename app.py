@@ -3,6 +3,7 @@ from ml_backend import prediction_dropdowns, market_dropdowns, plot_kalshi_data,
 from flask_cors import CORS
 from datetime import datetime
 from ml_backend import xgb_algorithm
+import os
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for frontend requests
@@ -80,4 +81,8 @@ def index():
             polymarket_url=polymarket_url
         )
 if __name__ == '__main__':
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+
+        
+
