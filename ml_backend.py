@@ -16,7 +16,7 @@ import random
 pymysql.install_as_MySQLdb()
 
 model = xgb.XGBClassifier()
-model = model.load_model('models/two_player_xgb.json')
+model = model.load_model('Models/two_player_xgb.json')
 
 table_map = {
 
@@ -264,7 +264,7 @@ def xgb_predict(final_df, key_players):
     rename_mapping = {}
     for idx, player in enumerate(key_players, start=1):
         for col in df_features.columns:
-            if col.startswith(player + '_'):
+            if (col.startswith(player + '_')):
                 new_col = col.replace(player + '_', f'Player{idx}_')
                 rename_mapping[col] = new_col
     print("DEBUG: Rename mapping:", rename_mapping)
@@ -740,4 +740,3 @@ from sklearn.metrics import roc_auc_score
 
 auc = roc_auc_score(y_test, y_pred)
 print("AUC:", auc)
-'''
