@@ -19,7 +19,7 @@ model = model.load_model('models/two_player_xgb.json')
 table_map = {
 
 }
-market_table_map = {
+market_name_map = {
 
 }
 
@@ -90,17 +90,8 @@ def suggest_market_table_mapping(polymarket_tables, kalshi_tables):
 
     return mapping
 
-def generate_flat_market_name_map(table_pairs, cutoff=0.6):
-    """
-    Flattens the mapping so it works in get_team_market_data_for_xgb.
-    Returns: {
-        'denver_nuggets': {'polymarket': 'denver_nuggets', 'kalshi': 'denver'},
-        ...
-    }
-    """
-    from difflib import get_close_matches
-
-    flat_map = {}
+def generate_nested_market_name_map(table_pairs, cutoff=0.6):
+    nested_map = {}
 
     for p_table, k_table in table_pairs.items():
         query_p = f"SELECT DISTINCT market_name FROM {p_table}"
@@ -111,49 +102,50 @@ def generate_flat_market_name_map(table_pairs, cutoff=0.6):
 
         k_cleaned = {name: name.lower() for name in k_markets}
 
+        submap = {}
         for p_market in p_markets:
             p_lower = p_market.lower()
             match = get_close_matches(p_lower, k_cleaned.values(), n=1, cutoff=cutoff)
             if match:
                 matched_k = next(k for k, v in k_cleaned.items() if v == match[0])
-                # Register mapping for both variants
-                flat_map[p_market.lower()] = {'polymarket': p_market, 'kalshi': matched_k}
-                flat_map[matched_k.lower()] = {'polymarket': p_market, 'kalshi': matched_k}
+                submap[p_lower] = {'polymarket': p_market, 'kalshi': matched_k}
+                submap[matched_k.lower()] = {'polymarket': p_market, 'kalshi': matched_k}
 
-    return flat_map
+        nested_map[p_table] = submap
+        nested_map[k_table] = submap
+
+    return nested_map
 
 def setup_maps():
+    global table_map
+    global market_name_map
     table_names = get_table_names()
     polymarket_tables = [name for name in table_names if name.startswith('P_')]
     kalshi_tables = [name for name in table_names if name.startswith('K_')]
     table_map = suggest_market_table_mapping(polymarket_tables, kalshi_tables)
-    market_name_map = generate_flat_market_name_map(table_map)
-    market_name_map
+    market_name_map = generate_nested_market_name_map(table_map)
+
 
 def get_team_market_data_for_xgb(input_table, input_market):
-    # Use the global market_name_map and table_map
     global market_name_map
     global table_map
 
-    # Check if the input market is available in the map
-    if input_market.lower() not in market_name_map:
-        raise ValueError(f"Market name '{input_market}' not found in mapping.")
-
-    # Retrieve the market mapping for polymarket and kalshi
-    base_market = market_name_map[input_market.lower()]
-    
-    # Check if input_table is polymarket or kalshi
+    input_market_lower = input_market.lower()
     is_polymarket = input_table.startswith('P_')
+    paired_table = table_map[input_table]
 
-    # Map to appropriate tables
-    polymarket_table = input_table if is_polymarket else table_map[input_table]
-    kalshi_table = input_table if not is_polymarket else table_map[input_table]
+    submap = market_name_map.get(input_table)
+    if not submap or input_market_lower not in submap:
+        raise ValueError(f"Market '{input_market}' not found for table '{input_table}'.")
 
-    # Retrieve market names for polymarket and kalshi
+    base_market = submap[input_market_lower]
+    polymarket_table = input_table if is_polymarket else paired_table
+    kalshi_table = paired_table if is_polymarket else input_table
+
     polymarket_market = base_market['polymarket']
     kalshi_market = base_market['kalshi']
 
-    # Query Polymarket
+    # Polymarket query
     query_p = f"""
         SELECT market_name, yes_price, no_price, timestamp 
         FROM {polymarket_table}
@@ -162,13 +154,14 @@ def get_team_market_data_for_xgb(input_table, input_market):
         LIMIT 100
     """
     df_p = pd.read_sql(query_p, con=engine, params=(f'%{polymarket_market}%',))
-    df_p['timestamp'] = pd.to_datetime(df_p['timestamp']).dt.floor('min')
+    df_p['timestamp'] = pd.to_datetime(df_p['timestamp'])
     df_p = df_p.rename(columns={
         'yes_price': 'polymarket_yes_price',
         'no_price': 'polymarket_no_price'
     }).sort_values('timestamp')
+    df_p = df_p.tail(30).reset_index(drop=True)
 
-    # Query Kalshi
+    # Kalshi query
     query_k = f"""
         SELECT market_name, yes_price, no_price, timestamp 
         FROM {kalshi_table}
@@ -177,25 +170,32 @@ def get_team_market_data_for_xgb(input_table, input_market):
         LIMIT 100
     """
     df_k = pd.read_sql(query_k, con=engine, params=(f'%{kalshi_market}%',))
-    df_k['timestamp'] = pd.to_datetime(df_k['timestamp']).dt.floor('min')
+    df_k['timestamp'] = pd.to_datetime(df_k['timestamp'])
     df_k = df_k.rename(columns={
         'yes_price': 'kalshi_yes_price',
         'no_price': 'kalshi_no_price'
     }).sort_values('timestamp')
+    df_k = df_k.tail(30).reset_index(drop=True)
+
+    print(f"✅ Polymarket shape: {df_p.shape}, Kalshi shape: {df_k.shape}")
+    return df_p, df_k
+
+def xgb_algorithm(input_table, input_market):
+
+    two_players = [input_market, "denver_nuggets"]
 
 
-    # Merge on rounded timestamp
-    merged = pd.merge(df_p, df_k, on='timestamp', how='outer').sort_values('timestamp')
-    merged = merged.ffill()
-
-    # Optional: Keep only last 30 combined rows
-    merged = merged.tail(30).reset_index(drop=True)
-
-    print(f"✅ Final merged shape: {merged.shape}")
-    return merged
-
-def xgb_algorithm():
+    mergedP, mergedK = get_team_market_data_for_xgb(input_table, input_market)
+    merged2P, merged2K = get_team_market_data_for_xgb(input_table, two_players[1])
     
+    df_final = pd.DataFrame()
+
+    df_temp_1 = align_and_generate_features(merged, lags=3, two_players[0])
+    df_temp_1['timestamp']
+    
+    
+
+
 
 
 
@@ -315,90 +315,6 @@ def align_and_generate_features(df, lags=3, player=None):
     final_df = pd.concat([df, lagged_df], axis=1).dropna()
 
     return final_df
-
-def plot_player_prices(player, start_time, end_time, new_db_path, db_path):
-    """
-    Plots YES prices for a given player from both polymarket and kalshi databases.
-
-    Parameters:
-    - player: str, player name (e.g. 'rory_mcilroy')
-    - start_time: str, timestamp (e.g. '2025-04-12 18:25:00')
-    - end_time: str, timestamp (e.g. '2025-04-12 22:30:00')
-    - new_db_path: str, path to Polymarket SQLite DB
-    - db_path: str, path to Kalshi SQLite DB
-    """
-    plt.figure(figsize=(12, 6))
-    player_label = player.replace('_', ' ').title()
-
-    # Plot from Polymarket DB
-    try:
-        conn_new = sqlite3.connect(new_db_path)
-        query_polymarket = f"""
-            SELECT timestamp, yes_price, no_price
-            FROM {player}
-            WHERE timestamp BETWEEN '{start_time}' AND '{end_time}'
-            ORDER BY timestamp
-        """
-        df_polymarket = pd.read_sql_query(query_polymarket, conn_new)
-        df_polymarket['timestamp'] = pd.to_datetime(df_polymarket['timestamp'])
-        #plt.plot(df_polymarket['timestamp'], df_polymarket['yes_price'],
-                 #label=f'{player_label} Yes Price (Polymarket)', marker='o', linestyle='-')
-        conn_new.close()
-    except Exception as e:
-        print(f"❌ Error loading Polymarket data for {player}: {e}")
-
-    # Plot from Kalshi DB
-    try:
-        conn_old = sqlite3.connect(db_path)
-        query_kalshi = f"""
-            SELECT timestamp, yes_price, no_price
-            FROM {player + "_merged"}
-            WHERE timestamp BETWEEN '{start_time}' AND '{end_time}'
-            ORDER BY timestamp
-        """
-        df_kalshi = pd.read_sql_query(query_kalshi, conn_old)
-        df_kalshi['timestamp'] = pd.to_datetime(df_kalshi['timestamp'])
-        #plt.plot(df_kalshi['timestamp'], df_kalshi['yes_price'],
-                 #label=f'{player_label} Yes Price (Kalshi)', marker='x', linestyle='--')
-        conn_old.close()
-    except Exception as e:
-        print(f"❌ Error loading Kalshi data for {player}: {e}")
-
-    #plt.xlabel("Timestamp")
-    #plt.ylabel("Yes Price")
-    #plt.title(f"YES Contract Price for {player_label}")
-    #plt.legend()
-    #plt.grid(True)
-    #plt.tight_layout()
-    #plt.show()
-
-    #rename each column to it's relevant polymarket_kalshi_prefix (except timestamp)
-    df_polymarket = df_polymarket.rename(columns={col: f'polymarket_{col}' for col in df_polymarket.columns if col != 'timestamp'})
-    df_kalshi = df_kalshi.rename(columns={col: f'kalshi_{col}' for col in df_kalshi.columns if col != 'timestamp'})
-
-    df_polymarket['timestamp'] = pd.to_datetime(df_polymarket['timestamp'])
-    df_kalshi['timestamp'] = pd.to_datetime(df_kalshi['timestamp'])
-
-    df_polymarket.set_index('timestamp', inplace=True)
-    df_kalshi.set_index('timestamp', inplace=True)
-
-    # Create a common time index (e.g., 1-minute intervals)
-    common_index = pd.date_range(
-      start=max(df_polymarket.index.min(), df_kalshi.index.min()),
-      end=min(df_polymarket.index.max(), df_kalshi.index.max()),
-      freq='20S'  # or whatever granularity you want
-    )
-
-    # Reindex both DataFrames and interpolate
-    df_polymarket = df_polymarket.reindex(common_index).ffill()
-    df_kalshi = df_kalshi.reindex(common_index).ffill()
-
-    df_combined = pd.concat([df_polymarket, df_kalshi], axis=1)
-    df_combined = df_combined.reset_index().rename(columns={'index': 'timestamp'})
-    df_combined = df_combined.dropna()
-    return df_combined
-
-
 
 def plot_polymarket_data(P_prediction, P_market, choice):
     if choice == 'yes':
